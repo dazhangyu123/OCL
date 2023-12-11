@@ -8,10 +8,11 @@ from utils.eval import build_eval_info
 from copy import deepcopy
 
 class Evaluater():
-    def __init__(self, args, cuda=None, train_id=None, logger=None):
-        self.args = args
-        self.method = self.args.method
-        os.environ["CUDA_VISIBLE_DEVICES"] = self.args.gpu
+    def __init__(self, cuda=None, train_id=None, logger=None, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        self.method = self.method
+        os.environ["CUDA_VISIBLE_DEVICES"] = self.gpu
         self.cuda = cuda and torch.cuda.is_available()
         self.device = torch.device('cuda' if self.cuda else 'cpu')
 
@@ -23,21 +24,21 @@ class Evaluater():
         self.logger = logger
 
         # set TensorboardX
-        self.writer = SummaryWriter(self.args.checkpoint_dir)
+        self.writer = SummaryWriter(self.checkpoint_dir)
 
         # Metric definition
-        self.Eval = Eval(self.args.num_classes)
+        self.Eval = Eval(self.num_classes)
 
         # model
-        self.model, params = get_model(self.args)
+        self.model, params = get_model(self)
         self.model = nn.DataParallel(self.model, device_ids=[0])
         self.model.eval()
         self.model.to(self.device)
 
         # load pretrained checkpoint
-        if self.args.pretrained_ckpt_file is not None:
-            path1 = os.path.join(*self.args.checkpoint_dir.split('/')[:-1], self.train_id + 'best.pth')
-            path2 = self.args.pretrained_ckpt_file
+        if self.pretrained_ckpt_file is not None:
+            path1 = os.path.join(*self.checkpoint_dir.split('/')[:-1], self.train_id + 'best.pth')
+            path2 = self.pretrained_ckpt_file
             if os.path.exists(path1):
                 pretrained_ckpt_file = path1
             elif os.path.exists(path2):
@@ -54,10 +55,10 @@ class Evaluater():
             nn.BatchNorm2d.prior = args.prior
 
         # dataloader
-        self.dataloader = City_DataLoader(self.args) if self.args.dataset=="cityscapes" else GTA5_DataLoader(self.args)
+        self.dataloader = City_DataLoader(self) if self.dataset=="cityscapes" else GTA5_DataLoader(self)
         self.dataloader.val_loader = self.dataloader.data_loader
         self.dataloader.valid_iterations = min(self.dataloader.num_iterations, 500)
-        self.epoch_num = ceil(self.args.iter_max / self.dataloader.num_iterations)
+        self.epoch_num = ceil(self.iter_max / self.dataloader.num_iterations)
 
     def main(self):
         # choose cuda
@@ -67,10 +68,10 @@ class Evaluater():
         else:
             self.logger.info("This model will run on CPU")
 
-        if self.args.method == 'TTT':
+        if self.method == 'TTT':
             # validate
             self.TTT()
-        elif self.args.method == 'baseline':
+        elif self.method == 'baseline':
             self.validate()
         else:
             raise AssertionError("do not implement ttt method")
@@ -85,8 +86,8 @@ class Evaluater():
 
 
         optimizer = optim.SGD(self.model.parameters(),
-                              lr=self.args.learning_rate, momentum=self.args.momentum,
-                              weight_decay=self.args.weight_decay)
+                              lr=self.learning_rate, momentum=self.momentum,
+                              weight_decay=self.weight_decay)
 
 
         metric_logger = MetricLogger(delimiter="  ")
@@ -106,12 +107,12 @@ class Evaluater():
 
             output_s_norm = F.normalize(F.softmax(output_s, dim=1), p=2, dim=1)
             naug, c, h, w = output_s.shape
-            output_s_ = output_s_norm.view(naug, c, -1)
+            output_s_ = output_s_norm[:,:,::self.downsampling,::self.downsampling].view(naug, c, -1)
 
             pos_loss = -(torch.mul(output_s_norm[0], output_s_norm[1])).sum(0).mean()
             neg_loss = ((output_s_[0].T @ output_s_[0]).mean() + (output_s_[1].T @ output_s_[1]).mean()) / naug
 
-            loss = self.args.pos_coeff * pos_loss + self.args.neg_coeff * neg_loss
+            loss = self.pos_coeff * pos_loss + self.neg_coeff * neg_loss
 
 
             optimizer.zero_grad()
@@ -135,12 +136,12 @@ class Evaluater():
             for nm, m  in self.model.named_modules():
                 for npp, p in m.named_parameters():
                     if npp in ['weight', 'bias'] and p.requires_grad:
-                        mask = (torch.rand(p.shape)<self.args.mask_ratio).float().to(self.device)
+                        mask = (torch.rand(p.shape)<self.mask_ratio).float().to(self.device)
                         with torch.no_grad():
                             p.data = anchor[f"{nm}.{npp}"] * mask + p * (1.-mask)
 
 
-        val_info = build_eval_info(self.args.class_16, self.logger, self.current_epoch)
+        val_info = build_eval_info(self.class_16, self.logger, self.current_epoch)
         PA, MPA, MIoU, FWIoU = val_info(self.Eval, "")
 
         self.Eval.Print_Every_class_Eval()
@@ -171,7 +172,7 @@ class Evaluater():
                 pred = pred[0]
             pred = F.interpolate(pred, size=x.size()[2:], mode='bilinear', align_corners=True)
 
-            if self.args.flip:
+            if self.flip:
                 pred_P = F.softmax(pred, dim=1)
 
                 x_flip = flip(x, -1)
@@ -193,7 +194,7 @@ class Evaluater():
             MIous.append(self.Eval.Mean_Intersection_over_Union())
 
 
-        val_info = build_eval_info(self.args.class_16, self.logger, self.current_epoch)
+        val_info = build_eval_info(self.class_16, self.logger, self.current_epoch)
         PA, MPA, MIoU, FWIoU = val_info(self.Eval, "")
 
         self.Eval.Print_Every_class_Eval()
@@ -213,8 +214,8 @@ class Evaluater():
             self.logger.info("Checkpoint loaded successfully from "+filename)
 
             if 'crop_size' in checkpoint:
-                self.args.crop_size = checkpoint['crop_size']
-                print(checkpoint['crop_size'], self.args.crop_size)
+                self.crop_size = checkpoint['crop_size']
+                print(checkpoint['crop_size'], self.crop_size)
         except OSError as e:
             self.logger.info("No checkpoint exists from '{}'. Skipping...".format(filename))
 
@@ -235,10 +236,14 @@ if __name__ == '__main__':
 
     arg_parser.add_argument("--pos-coeff", type=float, default=3.0,
                         help='Positive loss coefficient')
+    arg_parser.add_argument("--neg-coeff", type=float, default=1.0,
+                        help='Variance regularization loss coefficient')
     arg_parser.add_argument("--mask-ratio", type=float, default=0.01,
                         help='masking ratio in the stochastic restoration')
     arg_parser.add_argument("--prior", type=float, default=0.0, help=
                         "the hyperparameter determine the weight of training statistic")
+    arg_parser.add_argument("--downsampling", type=int, default=1, help=
+                        "setting the downsampling level when calculating negative term occupies too large GPU memory")
 
     # optimizer
     arg_parser.add_argument("--learning-rate", type=float, default=2e-5,
@@ -262,5 +267,5 @@ if __name__ == '__main__':
     args.crop_size = args.target_crop_size
     args.base_size = args.target_base_size
 
-    agent = Evaluater(args=args, cuda=True, train_id="train_id", logger=logger)
+    agent = Evaluater(cuda=True, train_id="train_id", logger=logger, **vars(args))
     agent.main()
